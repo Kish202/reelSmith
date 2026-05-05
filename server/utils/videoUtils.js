@@ -4,32 +4,51 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { put, head } from '@vercel/blob';
 
 const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Cache directory — shared across all jobs
-const CACHE_DIR = path.join(__dirname, '..', 'cache');
+const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+const BASE_DIR = isServerless ? '/tmp' : path.join(__dirname, '..');
+
+const CACHE_DIR = path.join(BASE_DIR, 'cache');
 fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 function getVideoId(url) {
-  // Create a hash of the URL to use as cache key
   return crypto.createHash('md5').update(url).digest('hex');
 }
 
 export async function downloadYouTubeVideo(url, jobId) {
-  const outputDir = path.join(__dirname, '..', 'outputs', jobId);
+  const outputDir = path.join(BASE_DIR, 'outputs', jobId);
   fs.mkdirSync(outputDir, { recursive: true });
 
   const videoId = getVideoId(url);
-  const cachedPath = path.join(CACHE_DIR, `${videoId}.mp4`);
+  const finalPath = path.join(outputDir, 'source.mp4');
 
-  // Return cached video if it exists
-  if (fs.existsSync(cachedPath)) {
-    console.log(`Cache hit for ${url} — skipping download`);
-    const finalPath = path.join(outputDir, 'source.mp4');
-    fs.copyFileSync(cachedPath, finalPath);
-    return finalPath;
+  if (isServerless) {
+    // Vercel: check Blob cache
+    try {
+      const blobKey = `cache/${videoId}.mp4`;
+      const existing = await head(blobKey, { token: process.env.BLOB_READ_WRITE_TOKEN });
+      if (existing) {
+        console.log(`Blob cache hit for ${url} — downloading from blob...`);
+        const res = await fetch(existing.url);
+        const buffer = await res.arrayBuffer();
+        fs.writeFileSync(finalPath, Buffer.from(buffer));
+        return finalPath;
+      }
+    } catch {
+      // No cache entry — proceed to download
+    }
+  } else {
+    // Local: check filesystem cache
+    const cachedPath = path.join(CACHE_DIR, `${videoId}.mp4`);
+    if (fs.existsSync(cachedPath)) {
+      console.log(`Local cache hit for ${url} — copying...`);
+      fs.copyFileSync(cachedPath, finalPath);
+      return finalPath;
+    }
   }
 
   console.log(`Cache miss for ${url} — downloading...`);
@@ -46,16 +65,31 @@ export async function downloadYouTubeVideo(url, jobId) {
     throw new Error('Video download failed — file not found after yt-dlp');
   }
 
-  // Rename to source.mp4 if different extension
+  // Rename to source.mp4 if needed
   const downloadedPath = path.join(outputDir, videoFile);
-  const finalPath = path.join(outputDir, 'source.mp4');
   if (downloadedPath !== finalPath) {
     fs.renameSync(downloadedPath, finalPath);
   }
 
-  // Save to cache for next time
-  fs.copyFileSync(finalPath, cachedPath);
-  console.log(`Cached video at ${cachedPath}`);
+  if (isServerless) {
+    // Vercel: upload to Blob cache
+    try {
+      const blobKey = `cache/${videoId}.mp4`;
+      const fileBuffer = fs.readFileSync(finalPath);
+      await put(blobKey, fileBuffer, {
+        access: 'public',
+        token: process.env.BLOB_READ_WRITE_TOKEN,
+      });
+      console.log(`Uploaded to Vercel Blob: ${blobKey}`);
+    } catch (err) {
+      console.warn('Blob upload failed (non-fatal):', err.message);
+    }
+  } else {
+    // Local: save to filesystem cache
+    const cachedPath = path.join(CACHE_DIR, `${videoId}.mp4`);
+    fs.copyFileSync(finalPath, cachedPath);
+    console.log(`Cached locally at ${cachedPath}`);
+  }
 
   return finalPath;
 }
