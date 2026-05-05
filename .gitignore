@@ -1,0 +1,10 @@
+node_modules/
+.env
+outputs/
+dist/
+.DS_Store
+*.mp4
+*.mp3
+client/.env
+server/.env
+
