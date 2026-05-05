@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 
 export default function BlogPost({ content }) {
   const [copied, setCopied] = useState(false);
+  
 
   const handleCopy = () => {
     navigator.clipboard.writeText(content);
